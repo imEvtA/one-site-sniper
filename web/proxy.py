@@ -156,6 +156,7 @@ async def proxy_pass(request: Request, path: str):
 
         injection = f"""
         <!-- Injected Ticketpro Sniper HUD -->
+        <script>window.__TP_PAGE_STATUS__ = {resp.status_code};</script>
         <link rel="stylesheet" href="/proxy-static/overlay.css?v={v_ts}">
         <script src="/proxy-static/overlay.js?v={v_ts}"></script>
         """
@@ -177,6 +178,8 @@ async def proxy_pass(request: Request, path: str):
             headers=resp_headers,
             media_type=content_type,
         )
+
+
 
     # Append sanitized set-cookie headers
     for cookie_header in raw_set_cookies:

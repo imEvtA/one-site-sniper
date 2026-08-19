@@ -1,9 +1,11 @@
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from core.bot import bot_manager
 from web.api import router as bot_router
 from web.proxy import router as proxy_router
 
@@ -12,7 +14,19 @@ logger = logging.getLogger("web.server")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-app = FastAPI(title="Ticketpro Reverse Proxy & Fast Sniper")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting Ticketpro Sniper Web Server...")
+    yield
+    # Shutdown: graceful kill of all bot tasks
+    logger.info("Server shutting down: stopping all active bot tasks...")
+    stopped_count = bot_manager.stop_all()
+    logger.info(f"Graceful shutdown complete (stopped {stopped_count} tasks).")
+
+
+app = FastAPI(title="Ticketpro Reverse Proxy & Fast Sniper", lifespan=lifespan)
 
 # Mount overlay static assets
 app.mount("/proxy-static", StaticFiles(directory=STATIC_DIR), name="proxy-static")

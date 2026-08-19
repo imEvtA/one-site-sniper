@@ -21,8 +21,11 @@ class StartBotRequest(BaseModel):
     num_consumers: int = 5
     poll_interval: float = 1.0
     allowed_price_ids: list[str] | None = None
+    min_price: float | None = None
+    max_price: float | None = None
     allowed_sectors: list[str] | None = None
     csrf_token: str | None = None
+    page_status: int | None = 200
 
 
 class StopBotRequest(BaseModel):
@@ -33,30 +36,87 @@ class ActivateSessionRequest(BaseModel):
     event_id: str
 
 
+@router.get("/event-prices")
+async def get_event_prices(event_id: str = Query(...)):
+    """
+    [Слой 1: Инициализация и каталог цен]
+    Запрашивает доступные категории цен без создания сессии в реестре задач.
+    """
+    session = bot_manager.get(event_id)
+    if session and session.config.event_prices:
+        return {
+            "status": "ok",
+            "event_id": event_id,
+            "prices": session.config.event_prices,
+            "valid_price_ids": list(session.config.valid_price_ids),
+        }
+
+    # Если сессии нет, запрашиваем цены через Fetcher без засорения реестра
+    fetcher = Fetcher(event_id=event_id)
+    prices = await fetcher.fetch_prices()
+    if prices:
+        if session:
+            session.config.event_prices = prices
+            session.config.update_valid_prices(prices)
+        return {
+            "status": "ok",
+            "event_id": event_id,
+            "prices": prices,
+            "valid_price_ids": list(prices.keys()),
+        }
+
+    return JSONResponse(
+        {"status": "error", "message": f"Мероприятие #{event_id} недоступно или не найдено"},
+        status_code=404
+    )
+
+
 @router.post("/start")
 async def start_bot(request: Request, req: StartBotRequest):
+    """
+    [Слой 2: Валидация статуса страницы, настройка фильтров и запуск охоты]
+    Создает и регистрирует сессию только после успешной валидации.
+    """
+    # 1. Валидация статуса страницы (мгновенный отказ при не-200)
+    if req.page_status is not None and not (200 <= req.page_status < 300):
+        logger.warning(f"[API START REJECTED] Event {req.event_id} rejected due to page status {req.page_status}")
+        return JSONResponse(
+            {"status": "error", "message": f"Отказ инициализации: статус страницы {req.page_status}"},
+            status_code=400
+        )
+
     browser_cookies = dict(request.cookies)
     csrf_token = req.csrf_token or request.headers.get("x-csrf-token")
     event_name = req.event_name or f"Событие #{req.event_id}"
 
-    logger.info(f"[API START] Event: {req.event_id} ({event_name}) | Cookies: {browser_cookies}")
-
-    config = BotConfig(
-        event_id=req.event_id,
-        event_name=event_name,
-        target_tickets=req.target_tickets,
-        num_consumers=req.num_consumers,
-        poll_interval=req.poll_interval,
-        allowed_price_ids=req.allowed_price_ids,
-        allowed_sectors=req.allowed_sectors,
-        cookies=browser_cookies.copy(),
-        csrf_token=csrf_token,
+    logger.info(
+        f"[API START] Event: {req.event_id} ({event_name}) | "
+        f"Prices filter: ids={req.allowed_price_ids}, min={req.min_price}, max={req.max_price} | "
+        f"Cookies: {browser_cookies}"
     )
 
-    session = bot_manager.get_or_create(config)
+    # Создаем/получаем сессию только после прохождения валидации
+    session = bot_manager.get_or_create(event_id=req.event_id, event_name=event_name)
+    session.config.cookies = browser_cookies.copy()
+    if csrf_token:
+        session.config.csrf_token = csrf_token
+
+    # 2. Применяем фильтры цен, билетов и секторов
+    session.set_filters(
+        allowed_price_ids=req.allowed_price_ids,
+        min_price=req.min_price,
+        max_price=req.max_price,
+        allowed_sectors=req.allowed_sectors,
+        target_tickets=req.target_tickets,
+        num_consumers=req.num_consumers,
+    )
+
+    # 3. Запускаем охоту
     await session.start()
 
     return {"status": "ok", "message": f"Sniper started for {event_name}", "event_id": req.event_id}
+
+
 
 
 @router.post("/stop")
@@ -93,31 +153,32 @@ async def activate_session(req: ActivateSessionRequest):
 
 @router.get("/stream")
 async def bot_stream(event_id: str = Query(...)):
+    """
+    SSE stream для live-логов и событий охоты.
+    Подключается только к существующей сессии бота.
+    """
     session = bot_manager.get(event_id)
     if not session:
-        config = BotConfig(event_id=event_id, event_name=f"Событие #{event_id}")
-        session = bot_manager.get_or_create(config)
+        return JSONResponse({"status": "error", "message": "Session not found"}, status_code=404)
 
     async def event_generator():
         q = session.subscribe()
-        initial_msg = {
-            "type": "status",
-            "event_id": event_id,
-            "event_name": session.config.event_name,
-            "message": f"Connected (status: {session.get_status_str()}, booked: {session.booked}/{session.config.target_tickets})",
-        }
-        yield f"data: {json.dumps(initial_msg)}\n\n"
-
         try:
+            yield f"data: {json.dumps({'type': 'init', **session.to_dict()})}\n\n"
             while True:
-                try:
-                    msg = await asyncio.wait_for(q.get(), timeout=20.0)
-                    yield f"data: {msg}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": ping\n\n"
-                except asyncio.CancelledError:
-                    break
+                data = await q.get()
+                yield f"data: {data}\n\n"
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
         finally:
             session.unsubscribe(q)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
