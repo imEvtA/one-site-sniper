@@ -12,11 +12,15 @@ except ImportError:
     from utils.constants import EVENT_ID, EVENT_URL, SCHEME_API_URL, HEADERS_TEMPLATE
 
 
+from typing import Any
+
+
 class Fetcher:
     def __init__(
         self,
         event_id: str = EVENT_ID,
-        parser: BaseParser | None = None
+        parser: BaseParser | None = None,
+        config: Any | None = None,
     ) -> None:
         self.event_id = event_id
         self.event_url = EVENT_URL
@@ -24,6 +28,8 @@ class Fetcher:
         self.headers_template = HEADERS_TEMPLATE.copy()
         self.headers_template["Referer"] = f"{self.event_url}/{self.event_id}/"
         self.parser = parser or DefaultParser()
+        self.config = config
+        self.prices: dict[str, dict[str, Any]] = {}
 
     async def update_cookies(
         self,
@@ -31,6 +37,7 @@ class Fetcher:
     ) -> tuple[dict[str, str], dict[str, str]] | None:
         """
         Обновляет сессионные куки и CSRF-токен события с главной страницы.
+        Также извлекает актуальный каталог цен.
         """
         if client is not None:
             resp = await client.get(f"/{self.event_id}/")
@@ -48,7 +55,38 @@ class Fetcher:
             return None
         headers["X-CSRF-Token"] = token_search.group(1)
 
+        # Парсинг блока цен со страницы
+        self.prices = self.parser.extract_event_prices(resp.text)
+        if self.config is not None and hasattr(self.config, "update_valid_prices"):
+            self.config.update_valid_prices(self.prices)
+
         return cookies, headers
+
+    async def fetch_prices(
+        self,
+        client: httpx.AsyncClient | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """
+        Выполняет запрос страницы события, парсит блок цен с помощью инкапсулированного
+        парсера и обновляет множество валидных price_id в связанном BotConfig.
+        """
+        own_client = False
+        if client is None:
+            client = httpx.AsyncClient(base_url=self.event_url)
+            own_client = True
+
+        try:
+            resp = await client.get(f"/{self.event_id}/")
+            if resp.status_code == 200:
+                self.prices = self.parser.extract_event_prices(resp.text)
+                if self.config is not None and hasattr(self.config, "update_valid_prices"):
+                    self.config.update_valid_prices(self.prices)
+                return self.prices
+            return {}
+        finally:
+            if own_client:
+                await client.aclose()
+
 
     async def start(
         self,
@@ -80,8 +118,13 @@ class Fetcher:
             if not svg_url:
                 return None
 
+            # Парсинг блока цен и запись в BotConfig valid_price_ids
+            self.prices = self.parser.extract_event_prices(resp.text)
+            if self.config is not None and hasattr(self.config, "update_valid_prices"):
+                self.config.update_valid_prices(self.prices)
+
             end_time = time.time()
-            logging.info(f"Time taken to fetch cookies and SVG URL: {end_time - start_time:.4f}s")
+            logging.info(f"Time taken to fetch cookies, prices and SVG URL: {end_time - start_time:.4f}s")
             return cookies, headers, svg_url
         finally:
             if own_client:

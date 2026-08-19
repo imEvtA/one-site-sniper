@@ -50,6 +50,7 @@
       </div>
 
       <div class="tp-widget-body" id="tp-body">
+        <div id="tp-error-container"></div>
         <!-- TAB 1: Current Event -->
         ${
           currentEventId
@@ -115,6 +116,17 @@
 
     document.body.appendChild(container);
     setupEvents(container);
+
+    // Проверка статуса страницы при инициализации
+    if (window.__TP_PAGE_STATUS__ && (window.__TP_PAGE_STATUS__ < 200 || window.__TP_PAGE_STATUS__ >= 300)) {
+      showErrorBanner(
+        `Страница вернула HTTP ${window.__TP_PAGE_STATUS__}`,
+        "Мероприятие или схема зала недоступны по текущему URL.",
+        "Убедитесь, что ссылка заканчивается слэшем (например, /kupit-bilet/48558/) либо выберите событие в общем каталоге.",
+        () => { window.location.reload(); }
+      );
+    }
+
     if (currentEventId) {
       loadPrices();
       checkCurrentStatus();
@@ -122,6 +134,32 @@
     refreshTasksList();
     setInterval(refreshTasksList, 3000);
   }
+
+  function showErrorBanner(title, message, instruction, onRetry = null) {
+    const container = document.getElementById("tp-error-container");
+    if (!container) return;
+    container.innerHTML = `
+      <div class="tp-error-banner" id="tp-active-error">
+        <div class="tp-error-header">
+          <div class="tp-error-title">⚠️ ${title}</div>
+          <button class="tp-error-close" id="tp-error-close-btn" title="Закрыть">&times;</button>
+        </div>
+        <div class="tp-error-msg">${message}</div>
+        ${instruction ? `<div class="tp-error-guide">💡 <strong>Как исправить:</strong> ${instruction}</div>` : ""}
+        ${onRetry ? `<div class="tp-error-actions"><button class="tp-btn-retry" id="tp-error-retry-btn">🔄 Повторить</button></div>` : ""}
+      </div>
+    `;
+    const closeBtn = document.getElementById("tp-error-close-btn");
+    if (closeBtn) closeBtn.addEventListener("click", () => { container.innerHTML = ""; });
+    const retryBtn = document.getElementById("tp-error-retry-btn");
+    if (retryBtn && onRetry) retryBtn.addEventListener("click", onRetry);
+  }
+
+  function clearErrorBanner() {
+    const container = document.getElementById("tp-error-container");
+    if (container) container.innerHTML = "";
+  }
+
 
   function logConsole(msg, color = "#38bdf8") {
     const box = document.getElementById("tp-console");
@@ -135,7 +173,7 @@
     box.scrollTop = box.scrollHeight;
   }
 
-  function loadPrices() {
+  async function loadPrices() {
     const container = document.getElementById("tp-price-container");
     if (!container) return;
 
@@ -145,7 +183,19 @@
         pricesObj = typeof prices_of_event === "string" ? JSON.parse(prices_of_event) : prices_of_event;
       }
     } catch (e) {
-      console.warn("Error parsing prices_of_event:", e);
+      console.warn("Error parsing prices_of_event from DOM:", e);
+    }
+
+    if (!pricesObj || Object.keys(pricesObj).length === 0) {
+      try {
+        const res = await fetch(`/api/bot/event-prices?event_id=${currentEventId}`);
+        const data = await res.json();
+        if (data.status === "ok" && data.prices && Object.keys(data.prices).length > 0) {
+          pricesObj = data.prices;
+        }
+      } catch (err) {
+        console.warn("Error fetching /api/bot/event-prices:", err);
+      }
     }
 
     if (!pricesObj || Object.keys(pricesObj).length === 0) {
@@ -176,6 +226,7 @@
       container.appendChild(pill);
     });
   }
+
 
   function getCsrfToken() {
     const meta = document.querySelector('meta[name="csrf-token"]');
@@ -246,12 +297,10 @@
         const allowedPrices = Array.from(selectedPrices);
         const csrfToken = getCsrfToken();
 
-        setRunningUI(targetTickets, 0);
+        clearErrorBanner();
         logConsole(`Запуск снайпера на ${targetTickets} билетов...`, "#a855f7");
 
         try {
-          connectSSE(currentEventId);
-
           const resp = await fetch("/api/bot/start", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -261,23 +310,40 @@
               target_tickets: targetTickets,
               allowed_price_ids: allowedPrices.length > 0 ? allowedPrices : null,
               csrf_token: csrfToken,
+              page_status: window.__TP_PAGE_STATUS__ || 200,
               num_consumers: 5
             })
           });
 
           const data = await resp.json();
           if (data.status === "ok") {
+            setRunningUI(targetTickets, 0);
+            connectSSE(currentEventId);
             logConsole("Снайпер запущен и охотится за билетами", "#10b981");
             refreshTasksList();
           } else {
             logConsole(`Ошибка запуска: ${data.message}`, "#ef4444");
+            showErrorBanner(
+              "Не удалось запустить снайпер",
+              data.message || "Сервер отклонил запрос на запуск.",
+              "Перезагрузите страницу мероприятия (F5), чтобы обновить CSRF-токен и куки сессии, затем повторите запуск.",
+              () => startBtn.click()
+            );
             resetUI();
           }
         } catch (err) {
           logConsole(`Сетевая ошибка: ${err.message}`, "#ef4444");
+          showErrorBanner(
+            "Сетевой сбой при запуске",
+            err.message,
+            "Проверьте, что локальный сервер снайпера запущен на порту 8000, и повторите попытку.",
+            () => startBtn.click()
+          );
           resetUI();
         }
       });
+
+
 
       stopBtn.addEventListener("click", async () => {
         try {
