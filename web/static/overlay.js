@@ -39,22 +39,19 @@
       </div>
 
       <div class="tp-nav-tabs">
-        ${
-          currentEventId
-            ? `<button class="tp-tab-btn tp-active-tab" id="tp-tab-current">⚡ Текущее</button>`
-            : ""
-        }
-        <button class="tp-tab-btn ${
-          !currentEventId ? "tp-active-tab" : ""
-        }" id="tp-tab-all">🎯 Все снайперы (<span id="tp-tasks-count">0</span>)</button>
+        ${currentEventId
+        ? `<button class="tp-tab-btn tp-active-tab" id="tp-tab-current">⚡ Текущее</button>`
+        : ""
+      }
+        <button class="tp-tab-btn ${!currentEventId ? "tp-active-tab" : ""
+      }" id="tp-tab-all">🎯 Все снайперы (<span id="tp-tasks-count">0</span>)</button>
       </div>
 
       <div class="tp-widget-body" id="tp-body">
         <div id="tp-error-container"></div>
         <!-- TAB 1: Current Event -->
-        ${
-          currentEventId
-            ? `
+        ${currentEventId
+        ? `
         <div id="tp-tab-pane-current">
           <div id="tp-error-container"></div>
 
@@ -106,8 +103,8 @@
           </div>
         </div>
         `
-            : ""
-        }
+        : ""
+      }
 
         <!-- TAB 2: All Tasks -->
         <div id="tp-tab-pane-all" style="${currentEventId ? "display:none;" : ""}">
@@ -331,11 +328,18 @@
       countInput.addEventListener("input", (e) => updateCount(e.target.value));
 
       startBtn.addEventListener("click", async () => {
+        if (startBtn.disabled) return;
+
         const targetTickets = parseInt(countInput.value) || 1;
         const allowedPrices = Array.from(selectedPrices);
         const csrfToken = getCsrfToken();
 
         clearErrorBanner();
+
+        // 1. Мгновенно блокируем кнопку и переключаем интерфейс в активный режим
+        startBtn.disabled = true;
+        setRunningUI(targetTickets, 0);
+        connectSSE(currentEventId);
         logConsole(`Запуск снайпера на ${targetTickets} билетов...`, "#a855f7");
 
         try {
@@ -355,8 +359,6 @@
 
           const data = await resp.json();
           if (data.status === "ok") {
-            setRunningUI(targetTickets, 0);
-            connectSSE(currentEventId);
             logConsole("Снайпер запущен и охотится за билетами", "#10b981");
             refreshTasksList();
           } else {
@@ -380,8 +382,9 @@
             () => { clearErrorBanner(); startBtn.click(); },
             true
           );
-
           resetUI();
+        } finally {
+          startBtn.disabled = false;
         }
       });
 
@@ -410,7 +413,10 @@
     const startBtn = document.getElementById("tp-start-btn");
     const stopBtn = document.getElementById("tp-stop-btn");
     const liveStatus = document.getElementById("tp-live-status");
-    if (startBtn) startBtn.style.display = "none";
+    if (startBtn) {
+      startBtn.disabled = true;
+      startBtn.style.display = "none";
+    }
     if (stopBtn) stopBtn.style.display = "block";
     if (liveStatus) {
       liveStatus.style.display = "inline-flex";
@@ -426,10 +432,14 @@
     const startBtn = document.getElementById("tp-start-btn");
     const stopBtn = document.getElementById("tp-stop-btn");
     const liveStatus = document.getElementById("tp-live-status");
-    if (startBtn) startBtn.style.display = "block";
+    if (startBtn) {
+      startBtn.disabled = false;
+      startBtn.style.display = "block";
+    }
     if (stopBtn) stopBtn.style.display = "none";
     if (liveStatus) liveStatus.style.display = "none";
   }
+
 
   async function checkCurrentStatus() {
     if (!currentEventId) return;
@@ -496,23 +506,27 @@
             ${t.time_live ? `<span class="tp-timer-badge">⏱ ${t.time_live}</span>` : ""}
           </div>
           <div class="tp-task-actions">
-            ${
-              isRunning
-                ? `<button class="tp-btn-danger tp-btn-sm" style="flex:1;" onclick="window.__tp_stop_task('${t.event_id}')">🛑 Стоп</button>`
-                : ""
-            }
-            ${
-              t.booked > 0
-                ? `<button class="tp-btn-primary tp-btn-sm" style="flex:1;" onclick="window.__tp_go_to_basket('${t.event_id}')">🛒 В корзину (${t.booked})</button>`
-                : `<a href="/kupit-bilet/${t.event_id}/" class="tp-btn-primary tp-btn-sm" style="flex:1; text-align:center;">Открыть</a>`
-            }
+            ${isRunning
+            ? `<button class="tp-btn-danger tp-btn-sm" style="flex:1;" onclick="window.__tp_stop_task('${t.event_id}')">🛑 Стоп</button>`
+            : ""
+          }
+            ${t.booked > 0
+            ? `<button class="tp-btn-primary tp-btn-sm" style="flex:1;" onclick="window.__tp_go_to_basket('${t.event_id}')">🛒 В корзину (${t.booked})</button>`
+            : `<a href="/kupit-bilet/${t.event_id}/" class="tp-btn-primary tp-btn-sm" style="flex:1; text-align:center;">Открыть</a>`
+          }
           </div>
         `;
         container.appendChild(card);
       });
     } catch (e) {
       console.warn("Could not refresh tasks list:", e);
+      const totalCounter = document.getElementById("tp-total-counter");
+      if (totalCounter) {
+        totalCounter.textContent = "Офлайн";
+        totalCounter.style.color = "#ef4444";
+      }
     }
+
   }
 
   window.__tp_stop_task = async function (eid) {
@@ -569,6 +583,15 @@
         eventSource.close();
         eventSource = null;
       }
+      // При отключении сервера возвращаем меню в исходное состояние и уведомляем
+      resetUI();
+      logConsole("⚠️ Связь с сервером прервана (сервер снайпера остановлен)", "#f59e0b");
+      showErrorBanner(
+        "Сервер снайпера остановлен",
+        "Действие сервера приостановлено или соединение было разорвано.",
+        () => { window.location.reload(); },
+        false
+      );
     };
 
     eventSource.onmessage = (e) => {
@@ -607,6 +630,7 @@
       }
     };
   }
+
 
 
   // Initialize widget when DOM is ready

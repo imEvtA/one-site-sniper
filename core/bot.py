@@ -310,10 +310,16 @@ class BotManager:
     def __init__(self, parser_class: type[BaseParser] = DefaultParser):
         self.presessions: dict[str, PresessionData] = {}
         self.sessions: dict[str, BotSession] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
         self.parser: BaseParser = parser_class()
         self.presession_pipeline = build_presession_pipeline()
         self.start_pipeline = build_start_pipeline()
         self.default_pipeline = build_default_preflight_pipeline()
+
+    def _get_lock(self, event_id: str) -> asyncio.Lock:
+        if event_id not in self._locks:
+            self._locks[event_id] = asyncio.Lock()
+        return self._locks[event_id]
 
     async def prepare_presession(
         self,
@@ -407,61 +413,65 @@ class BotManager:
         """
         eid = str(req.event_id)
 
-        # Остановка предыдущей сессии для этого же мероприятия, если она запущена
-        existing = self.sessions.get(eid)
-        if existing and existing.is_running():
-            existing.stop()
+        async with self._get_lock(eid):
+            # Остановка предыдущей сессии для этого же мероприятия, если она запущена
+            existing = self.sessions.get(eid)
+            if existing and existing.is_running():
+                existing.stop()
+                # Ждем короткий тик, чтобы фоновый таск успел завершиться
+                await asyncio.sleep(0.01)
 
-        # Извлекаем предсессию
-        presession = self.presessions.get(eid)
-        all_prices = presession.prices if presession else []
-        fallback_csrf = presession.csrf_token if presession else None
-        cached_svg_url = presession.svg_url if presession else None
+            # Извлекаем предсессию
+            presession = self.presessions.get(eid)
+            all_prices = presession.prices if presession else []
+            fallback_csrf = presession.csrf_token if presession else None
+            cached_svg_url = presession.svg_url if presession else None
 
-        merged_cookies = (presession.cookies.copy() if presession else {})
-        merged_cookies.update(cookies)
+            merged_cookies = (presession.cookies.copy() if presession else {})
+            merged_cookies.update(cookies)
 
-        # Конвертируем запрос в PipelineContext с уже известным svg_url
-        if hasattr(req, "to_pipeline_context"):
-            ctx = req.to_pipeline_context(cookies=merged_cookies, all_event_prices=all_prices, svg_url=cached_svg_url)
-        else:
-            ctx = PipelineContext(
-                event_id=eid,
-                event_name=getattr(req, "event_name", None) or f"Событие #{eid}",
-                target_tickets=getattr(req, "target_tickets", 1),
-                num_consumers=getattr(req, "num_consumers", 5),
-                poll_interval=getattr(req, "poll_interval", 1.0),
-                raw_cookies=merged_cookies,
-                csrf_token=getattr(req, "csrf_token", None) or fallback_csrf,
-                page_status=getattr(req, "page_status", 200) or 200,
-                allowed_price_ids=getattr(req, "allowed_price_ids", None),
-                min_price=getattr(req, "min_price", None),
-                max_price=getattr(req, "max_price", None),
-                allowed_sectors=getattr(req, "allowed_sectors", None),
-                all_event_prices=all_prices,
-                svg_url=cached_svg_url,
-            )
+            # Конвертируем запрос в PipelineContext с уже известным svg_url
+            if hasattr(req, "to_pipeline_context"):
+                ctx = req.to_pipeline_context(cookies=merged_cookies, all_event_prices=all_prices, svg_url=cached_svg_url)
+            else:
+                ctx = PipelineContext(
+                    event_id=eid,
+                    event_name=getattr(req, "event_name", None) or f"Событие #{eid}",
+                    target_tickets=getattr(req, "target_tickets", 1),
+                    num_consumers=getattr(req, "num_consumers", 5),
+                    poll_interval=getattr(req, "poll_interval", 1.0),
+                    raw_cookies=merged_cookies,
+                    csrf_token=getattr(req, "csrf_token", None) or fallback_csrf,
+                    page_status=getattr(req, "page_status", 200) or 200,
+                    allowed_price_ids=getattr(req, "allowed_price_ids", None),
+                    min_price=getattr(req, "min_price", None),
+                    max_price=getattr(req, "max_price", None),
+                    allowed_sectors=getattr(req, "allowed_sectors", None),
+                    all_event_prices=all_prices,
+                    svg_url=cached_svg_url,
+                )
 
-        if not ctx.csrf_token and fallback_csrf:
-            ctx.csrf_token = fallback_csrf
+            if not ctx.csrf_token and fallback_csrf:
+                ctx.csrf_token = fallback_csrf
 
-        # Если пользователь передал свой пайплайн — используем его
-        if pipeline:
-            runner = pipeline
-        elif ctx.svg_url:
-            # Схема уже известна из предсессии -> быстрый старт за 0мс!
-            runner = self.start_pipeline
-        else:
-            # Схема ещё не разрезолвлена (прямой API вызов) -> полный конвейер
-            runner = self.default_pipeline
+            # Если пользователь передал свой пайплайн — используем его
+            if pipeline:
+                runner = pipeline
+            elif ctx.svg_url:
+                # Схема уже известна из предсессии -> быстрый старт за 0мс!
+                runner = self.start_pipeline
+            else:
+                # Схема ещё не разрезолвлена (прямой API вызов) -> полный конвейер
+                runner = self.default_pipeline
 
-        hunting_ctx = await runner.run(ctx)
+            hunting_ctx = await runner.run(ctx)
 
-        # Создание и немедленный запуск сессии
-        session = BotSession(hunting_ctx)
-        self.sessions[eid] = session
-        await session.start()
-        return session
+            # Создание и немедленный запуск сессии
+            session = BotSession(hunting_ctx)
+            self.sessions[eid] = session
+            await session.start()
+            return session
+
 
     def get(self, event_id: str) -> BotSession | None:
         return self.sessions.get(str(event_id))
