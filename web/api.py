@@ -5,118 +5,89 @@ from typing import Any
 
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
 
-from core.bot import BotConfig, bot_manager
+from core.bot import BotStatus, bot_manager
+from core.pipeline.exceptions import PreflightError
+from core.schemas import (
+    ActivateSessionRequest,
+    PresessionResponse,
+    StartBotRequest,
+    StopBotRequest,
+)
 
 logger = logging.getLogger("web.api")
 
 router = APIRouter(prefix="/api/bot", tags=["bot"])
 
 
-class StartBotRequest(BaseModel):
-    event_id: str
-    event_name: str | None = None
-    target_tickets: int = 1
-    num_consumers: int = 5
-    poll_interval: float = 1.0
-    allowed_price_ids: list[str] | None = None
-    min_price: float | None = None
-    max_price: float | None = None
-    allowed_sectors: list[str] | None = None
-    csrf_token: str | None = None
-    page_status: int | None = 200
+@router.get("/presession")
+async def get_presession(event_id: str = Query(...)):
+    """
+    Возвращает метаданные предсессии (список категорий цен, CSRF статус) для отрисовки HUD.
+    """
+    presession = bot_manager.get_presession(event_id)
+    if presession:
+        return presession.to_dict()
 
-
-class StopBotRequest(BaseModel):
-    event_id: str
-
-
-class ActivateSessionRequest(BaseModel):
-    event_id: str
+    return JSONResponse(
+        {"status": "error", "message": f"Предсессия для мероприятия #{event_id} не найдена"},
+        status_code=404,
+    )
 
 
 @router.get("/event-prices")
 async def get_event_prices(event_id: str = Query(...)):
     """
-    [Слой 1: Инициализация и каталог цен]
-    Запрашивает доступные категории цен без создания сессии в реестре задач.
+    Эндпоинт обратной совместимости для получения списка цен.
     """
-    session = bot_manager.get(event_id)
-    if session and session.config.event_prices:
+    presession = bot_manager.get_presession(event_id)
+    if presession and presession.prices:
         return {
             "status": "ok",
             "event_id": event_id,
-            "prices": session.config.event_prices,
-            "valid_price_ids": list(session.config.valid_price_ids),
-        }
-
-    # Если сессии нет, запрашиваем цены через Fetcher без засорения реестра
-    fetcher = Fetcher(event_id=event_id)
-    prices = await fetcher.fetch_prices()
-    if prices:
-        if session:
-            session.config.event_prices = prices
-            session.config.update_valid_prices(prices)
-        return {
-            "status": "ok",
-            "event_id": event_id,
-            "prices": prices,
-            "valid_price_ids": list(prices.keys()),
+            "prices": {str(p.get("id", "")): p for p in presession.prices},
+            "valid_price_ids": presession.valid_price_ids,
         }
 
     return JSONResponse(
-        {"status": "error", "message": f"Мероприятие #{event_id} недоступно или не найдено"},
-        status_code=404
+        {"status": "error", "message": f"Мероприятие #{event_id} недоступно или не инициализировано"},
+        status_code=404,
     )
 
 
 @router.post("/start")
 async def start_bot(request: Request, req: StartBotRequest):
     """
-    [Слой 2: Валидация статуса страницы, настройка фильтров и запуск охоты]
-    Создает и регистрирует сессию только после успешной валидации.
+    Запускает снайпер через Preflight Pipeline и BotManager.
+    При сбое проверок возвращает типизированную ошибку с инструкцией по решению.
     """
-    # 1. Валидация статуса страницы (мгновенный отказ при не-200)
-    if req.page_status is not None and not (200 <= req.page_status < 300):
-        logger.warning(f"[API START REJECTED] Event {req.event_id} rejected due to page status {req.page_status}")
-        return JSONResponse(
-            {"status": "error", "message": f"Отказ инициализации: статус страницы {req.page_status}"},
-            status_code=400
-        )
-
     browser_cookies = dict(request.cookies)
-    csrf_token = req.csrf_token or request.headers.get("x-csrf-token")
-    event_name = req.event_name or f"Событие #{req.event_id}"
-
-    logger.info(
-        f"[API START] Event: {req.event_id} ({event_name}) | "
-        f"Prices filter: ids={req.allowed_price_ids}, min={req.min_price}, max={req.max_price} | "
-        f"Cookies: {browser_cookies}"
-    )
-
-    # Создаем/получаем сессию только после прохождения валидации
-    session = bot_manager.get_or_create(event_id=req.event_id, event_name=event_name)
-    session.config.cookies = browser_cookies.copy()
-    if csrf_token:
-        session.config.csrf_token = csrf_token
-
-    # 2. Применяем фильтры цен, билетов и секторов
-    session.set_filters(
-        allowed_price_ids=req.allowed_price_ids,
-        min_price=req.min_price,
-        max_price=req.max_price,
-        allowed_sectors=req.allowed_sectors,
-        target_tickets=req.target_tickets,
-        num_consumers=req.num_consumers,
-    )
-
-    # 3. Запускаем охоту
-    await session.start()
-
-    return {"status": "ok", "message": f"Sniper started for {event_name}", "event_id": req.event_id}
-
-
+    try:
+        session = await bot_manager.start_session(req=req, cookies=browser_cookies)
+        return {
+            "status": "ok",
+            "message": f"Sniper started for {session.event_name}",
+            "event_id": session.event_id,
+        }
+    except PreflightError as err:
+        logger.warning(f"[API START PREFLIGHT FAILED] {err}")
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": err.message,
+                "error": err.to_dict(),
+            },
+            status_code=400,
+        )
+    except Exception as exc:
+        logger.exception(f"[API START UNEXPECTED ERROR] {exc}")
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": f"Внутренняя ошибка запуска снайпера: {exc}",
+            },
+            status_code=500,
+        )
 
 
 @router.post("/stop")
@@ -143,19 +114,24 @@ async def get_bot_status(event_id: str = Query(...)):
 @router.post("/activate-session")
 async def activate_session(req: ActivateSessionRequest):
     session = bot_manager.get(req.event_id)
-    if session and session.config.cookies:
+    cookies = session.ctx.cookies if session else None
+    if not cookies:
+        presession = bot_manager.get_presession(req.event_id)
+        cookies = presession.cookies if presession else None
+
+    if cookies:
         response = JSONResponse({"status": "ok", "message": f"Session switched to event {req.event_id}"})
-        for k, v in session.config.cookies.items():
+        for k, v in cookies.items():
             response.set_cookie(key=k, value=v, path="/", httponly=True, samesite="lax")
         return response
+
     return JSONResponse({"status": "error", "message": "Session not found"}, status_code=404)
 
 
 @router.get("/stream")
-async def bot_stream(event_id: str = Query(...)):
+async def bot_stream(request: Request, event_id: str = Query(...)):
     """
     SSE stream для live-логов и событий охоты.
-    Подключается только к существующей сессии бота.
     """
     session = bot_manager.get(event_id)
     if not session:
@@ -166,7 +142,18 @@ async def bot_stream(event_id: str = Query(...)):
         try:
             yield f"data: {json.dumps({'type': 'init', **session.to_dict()})}\n\n"
             while True:
-                data = await q.get()
+                if await request.is_disconnected():
+                    break
+                try:
+                    data = await asyncio.wait_for(q.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    if session.status in (BotStatus.STOPPED, BotStatus.FINISHED, BotStatus.ERROR) or not session.is_running():
+                        break
+                    yield ": ping\n\n"
+                    continue
+
+                if data is None:
+                    break
                 yield f"data: {data}\n\n"
         except (asyncio.CancelledError, GeneratorExit):
             pass
