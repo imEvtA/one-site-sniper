@@ -56,48 +56,52 @@
           currentEventId
             ? `
         <div id="tp-tab-pane-current">
-          <div class="tp-status-row">
-            <span style="font-weight:600; color:#f1f5f9; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${currentEventName}">${currentEventName}</span>
-            <span id="tp-live-status" class="tp-status-live" style="display:none;">
-              <span class="tp-status-dot"></span> Снайпер
-            </span>
-          </div>
+          <div id="tp-error-container"></div>
 
-          <div class="tp-field-group">
-            <div class="tp-label">
-              <span>Количество мест:</span>
-              <span id="tp-target-display">1 шт.</span>
+          <div id="tp-controls-section">
+            <div class="tp-status-row">
+              <span style="font-weight:600; color:#f1f5f9; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${currentEventName}">${currentEventName}</span>
+              <span id="tp-live-status" class="tp-status-live" style="display:none;">
+                <span class="tp-status-dot"></span> Снайпер
+              </span>
             </div>
-            <div class="tp-counter-control">
-              <button class="tp-counter-btn" id="tp-count-dec">-</button>
-              <input type="number" id="tp-count-input" class="tp-counter-input" value="1" min="1" max="10" />
-              <button class="tp-counter-btn" id="tp-count-inc">+</button>
-            </div>
-          </div>
 
-          <div class="tp-field-group">
-            <div class="tp-label">
-              <span>Фильтр по цене:</span>
-              <span id="tp-price-count">Все цены</span>
+            <div class="tp-field-group">
+              <div class="tp-label">
+                <span>Количество мест:</span>
+                <span id="tp-target-display">1 шт.</span>
+              </div>
+              <div class="tp-counter-control">
+                <button class="tp-counter-btn" id="tp-count-dec">-</button>
+                <input type="number" id="tp-count-input" class="tp-counter-input" value="1" min="1" max="10" />
+                <button class="tp-counter-btn" id="tp-count-inc">+</button>
+              </div>
             </div>
-            <div class="tp-price-pills" id="tp-price-container">
-              <div style="color:#94a3b8; font-size:11px;">Загрузка категорий цен...</div>
+
+            <div class="tp-field-group">
+              <div class="tp-label">
+                <span>Фильтр по цене:</span>
+                <span id="tp-price-count">Все цены</span>
+              </div>
+              <div class="tp-price-pills" id="tp-price-container">
+                <div style="color:#94a3b8; font-size:11px;">Загрузка категорий цен...</div>
+              </div>
             </div>
-          </div>
 
-          <div class="tp-field-group">
-            <button id="tp-start-btn" class="tp-btn-primary">
-              🚀 Запустить снайпер
-            </button>
-            <button id="tp-stop-btn" class="tp-btn-danger" style="display:none;">
-              🛑 Остановить
-            </button>
-          </div>
+            <div class="tp-field-group">
+              <button id="tp-start-btn" class="tp-btn-primary">
+                🚀 Запустить снайпер
+              </button>
+              <button id="tp-stop-btn" class="tp-btn-danger" style="display:none;">
+                🛑 Остановить
+              </button>
+            </div>
 
-          <div class="tp-field-group">
-            <div class="tp-label">Live Console:</div>
-            <div class="tp-console-box" id="tp-console">
-              <div class="tp-log-item">> Снайпер готов к запуску</div>
+            <div class="tp-field-group">
+              <div class="tp-label">Live Console:</div>
+              <div class="tp-console-box" id="tp-console">
+                <div class="tp-log-item">> Снайпер готов к запуску</div>
+              </div>
             </div>
           </div>
         </div>
@@ -121,9 +125,10 @@
     if (window.__TP_PAGE_STATUS__ && (window.__TP_PAGE_STATUS__ < 200 || window.__TP_PAGE_STATUS__ >= 300)) {
       showErrorBanner(
         `Страница вернула HTTP ${window.__TP_PAGE_STATUS__}`,
-        "Мероприятие или схема зала недоступны по текущему URL.",
-        "Убедитесь, что ссылка заканчивается слэшем (например, /kupit-bilet/48558/) либо выберите событие в общем каталоге.",
-        () => { window.location.reload(); }
+        "Мероприятие или схема зала недоступны по текущему адресу.",
+        "Проверьте правильность ID мероприятия или выберите событие в каталоге Ticketpro.",
+        () => { window.location.reload(); },
+        true
       );
     }
 
@@ -135,7 +140,7 @@
     setInterval(refreshTasksList, 3000);
   }
 
-  function showErrorBanner(title, message, instruction, onRetry = null) {
+  function showErrorBanner(title, message, instruction, onRetry = null, hideControls = true) {
     const container = document.getElementById("tp-error-container");
     if (!container) return;
     container.innerHTML = `
@@ -149,8 +154,16 @@
         ${onRetry ? `<div class="tp-error-actions"><button class="tp-btn-retry" id="tp-error-retry-btn">🔄 Повторить</button></div>` : ""}
       </div>
     `;
+    const controls = document.getElementById("tp-controls-section");
+    if (controls && hideControls) {
+      controls.style.display = "none";
+    }
+
     const closeBtn = document.getElementById("tp-error-close-btn");
-    if (closeBtn) closeBtn.addEventListener("click", () => { container.innerHTML = ""; });
+    if (closeBtn) closeBtn.addEventListener("click", () => {
+      container.innerHTML = "";
+      if (controls) controls.style.display = "block";
+    });
     const retryBtn = document.getElementById("tp-error-retry-btn");
     if (retryBtn && onRetry) retryBtn.addEventListener("click", onRetry);
   }
@@ -158,7 +171,10 @@
   function clearErrorBanner() {
     const container = document.getElementById("tp-error-container");
     if (container) container.innerHTML = "";
+    const controls = document.getElementById("tp-controls-section");
+    if (controls) controls.style.display = "block";
   }
+
 
 
   function logConsole(msg, color = "#38bdf8") {
@@ -177,34 +193,56 @@
     const container = document.getElementById("tp-price-container");
     if (!container) return;
 
-    let pricesObj = null;
+    let pricesList = null;
+
+    // 1. Попытка получить предсессию из ядра
     try {
-      if (typeof prices_of_event !== "undefined" && prices_of_event) {
-        pricesObj = typeof prices_of_event === "string" ? JSON.parse(prices_of_event) : prices_of_event;
-      }
-    } catch (e) {
-      console.warn("Error parsing prices_of_event from DOM:", e);
-    }
-
-    if (!pricesObj || Object.keys(pricesObj).length === 0) {
-      try {
-        const res = await fetch(`/api/bot/event-prices?event_id=${currentEventId}`);
+      const res = await fetch(`/api/bot/presession?event_id=${currentEventId}`);
+      if (res.ok) {
         const data = await res.json();
-        if (data.status === "ok" && data.prices && Object.keys(data.prices).length > 0) {
-          pricesObj = data.prices;
+        if (data.page_status && data.page_status !== 200) {
+          showErrorBanner(
+            `Страница мероприятия #${currentEventId} вернула статус ${data.page_status}`,
+            "Мероприятие или схема зала недоступны по текущему адресу.",
+            "Проверьте правильность ID мероприятия или выберите событие в каталоге Ticketpro.",
+            () => { window.location.reload(); },
+            true
+          );
+          return;
         }
-      } catch (err) {
-        console.warn("Error fetching /api/bot/event-prices:", err);
+        if (data.error && data.error.code === "SCHEME_NOT_FOUND") {
+          logConsole(`ℹ️ Схема зала: ${data.error.hint}`, "#f59e0b");
+        }
+        if (data.status === "ok" && data.prices && data.prices.length > 0) {
+          pricesList = data.prices;
+        }
+      }
+    } catch (err) {
+      console.warn("Error fetching /api/bot/presession:", err);
+    }
+
+
+
+
+    // 2. Fallback из DOM
+    if (!pricesList) {
+      try {
+        if (typeof prices_of_event !== "undefined" && prices_of_event) {
+          const raw = typeof prices_of_event === "string" ? JSON.parse(prices_of_event) : prices_of_event;
+          pricesList = Object.values(raw);
+        }
+      } catch (e) {
+        console.warn("Error parsing prices_of_event from DOM:", e);
       }
     }
 
-    if (!pricesObj || Object.keys(pricesObj).length === 0) {
+    if (!pricesList || pricesList.length === 0) {
       container.innerHTML = `<div style="color:#94a3b8; font-size:11px;">Цены выбираются автоматически</div>`;
       return;
     }
 
     container.innerHTML = "";
-    Object.values(pricesObj).forEach((p) => {
+    pricesList.forEach((p) => {
       const pill = document.createElement("div");
       pill.className = "tp-pill";
       pill.dataset.priceId = p.id;
@@ -322,12 +360,14 @@
             logConsole("Снайпер запущен и охотится за билетами", "#10b981");
             refreshTasksList();
           } else {
-            logConsole(`Ошибка запуска: ${data.message}`, "#ef4444");
+            const errDetail = data.error || {};
+            logConsole(`❌ ${errDetail.message || data.message}`, "#ef4444");
             showErrorBanner(
-              "Не удалось запустить снайпер",
-              data.message || "Сервер отклонил запрос на запуск.",
-              "Перезагрузите страницу мероприятия (F5), чтобы обновить CSRF-токен и куки сессии, затем повторите запуск.",
-              () => startBtn.click()
+              errDetail.message || "Не удалось запустить снайпер",
+              errDetail.code ? `[${errDetail.code}] Шаг проверки: ${errDetail.step || "Preflight"}` : (data.message || "Отказ запуска"),
+              errDetail.hint || "Перезагрузите страницу мероприятия (F5), чтобы обновить CSRF-токен и куки сессии, затем повторите запуск.",
+              () => { clearErrorBanner(); startBtn.click(); },
+              true
             );
             resetUI();
           }
@@ -337,11 +377,14 @@
             "Сетевой сбой при запуске",
             err.message,
             "Проверьте, что локальный сервер снайпера запущен на порту 8000, и повторите попытку.",
-            () => startBtn.click()
+            () => { clearErrorBanner(); startBtn.click(); },
+            true
           );
+
           resetUI();
         }
       });
+
 
 
 
@@ -376,6 +419,10 @@
   }
 
   function resetUI() {
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
     const startBtn = document.getElementById("tp-start-btn");
     const stopBtn = document.getElementById("tp-stop-btn");
     const liveStatus = document.getElementById("tp-live-status");
@@ -511,14 +558,28 @@
   }
 
   function connectSSE(eid) {
-    if (eventSource) eventSource.close();
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
     eventSource = new EventSource(`/api/bot/stream?event_id=${eid}`);
+
+    eventSource.onerror = () => {
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+    };
 
     eventSource.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data);
         if (data.type === "status") {
           logConsole(`> ${data.message}`, "#38bdf8");
+          if (data.status === "stopped") {
+            resetUI();
+            refreshTasksList();
+          }
         } else if (data.type === "session_initialized") {
           logConsole("✓ Сессия получена, схема найдена", "#10b981");
         } else if (data.type === "tickets_streamed") {
@@ -546,6 +607,7 @@
       }
     };
   }
+
 
   // Initialize widget when DOM is ready
   if (document.readyState === "loading") {
