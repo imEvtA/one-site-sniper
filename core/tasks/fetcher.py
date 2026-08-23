@@ -6,13 +6,13 @@ from typing import Any
 
 import httpx
 
+from .base_fetcher import BaseFetcher
 from .utils.constants import EVENT_ID, EVENT_URL, SCHEME_API_URL, HEADERS_TEMPLATE, AUTH_SVG_BASE_URL
 
 logger = logging.getLogger("core.fetcher")
 
 
-
-class Fetcher:
+class Fetcher(BaseFetcher):
     """
     Чистый сетевой клиент для Ticketpro (I/O слой).
     Отвечает исключительно за HTTP-запросы без привязки к парсерам или состоянию бота.

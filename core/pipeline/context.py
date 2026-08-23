@@ -10,7 +10,7 @@ class PipelineContext:
     Чистый Python dataclass без внешних зависимостей от фреймворков.
     """
     event_id: str
-    event_name: str
+    event_name: str = "Событие"
     target_tickets: int = 1
     num_consumers: int = 5
     poll_interval: float = 1.0
@@ -28,6 +28,15 @@ class PipelineContext:
     svg_url: str | None = None
     all_event_prices: list[dict] = field(default_factory=list)
     resolved_price_ids: set[str] = field(default_factory=set)
+
+    @property
+    def valid_price_ids(self) -> set[str]:
+        return self.resolved_price_ids or set(self.allowed_price_ids or [])
+
+    @property
+    def cookies(self) -> dict[str, str]:
+        return self.raw_cookies
+
     client: httpx.AsyncClient | None = None
 
 

@@ -4,7 +4,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -20,6 +20,8 @@ from core.pipeline import (
 from core.tasks.consumer import AtomicCounter, ConsumerPool
 from core.tasks.fetcher import Fetcher
 from core.tasks.parser import BaseParser, DefaultParser, Ticket
+from core.tasks.payloads import BookedTicketPayload, FilterSnapshot
+from core.tasks.producer import ProducerUnit
 
 logger = logging.getLogger("core.bot")
 
@@ -47,7 +49,10 @@ class PresessionData:
     svg_url: str | None = None
     page_status: int = 200
     error: dict[str, str] | None = None
-    updated_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=time.time)
+
+    def is_expired(self, ttl_seconds: float = 600.0) -> bool:
+        return (time.time() - self.created_at) > ttl_seconds
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -70,7 +75,14 @@ class BotSession:
     Получает готовый HuntingContext после успешного прохождения Preflight Pipeline
     и занимается исключительно скоростным снайпингом билетов.
     """
-    def __init__(self, ctx: HuntingContext, parser_class: type[BaseParser] = DefaultParser):
+    def __init__(
+        self,
+        ctx: HuntingContext,
+        parser_class: type[BaseParser] = DefaultParser,
+        producer_unit: Any | None = None,
+        session_provider: Any | None = None,
+        on_payload_callback: Callable[[Any], Any] | None = None,
+    ):
         self.ctx = ctx
         self.status = BotStatus.IDLE
         self.booked = 0
@@ -79,12 +91,19 @@ class BotSession:
         self.error_message: str | None = None
         self.task: asyncio.Task[Any] | None = None
         self.subscribers: set[asyncio.Queue[str | None]] = set()
+        self.on_payload_callback = on_payload_callback
+        self.session_provider = session_provider
 
         self.parser: BaseParser = parser_class(
             allowed_sectors=self.ctx.allowed_sectors,
             valid_price_ids=self.ctx.valid_price_ids,
         )
         self.fetcher: Fetcher = Fetcher(event_id=self.ctx.event_id)
+        self.producer_unit = producer_unit or ProducerUnit(
+            event_id=self.ctx.event_id,
+            parser=self.parser,
+            fetcher=self.fetcher,
+        )
         self.consumer_pool: ConsumerPool | None = None
 
     @property
@@ -102,6 +121,16 @@ class BotSession:
         if self.is_running():
             return BotStatus.RUNNING.value
         return self.status.value
+
+    def update_filter_snapshot(self, snapshot: FilterSnapshot) -> None:
+        """
+        Атомарная подмена ссылки на иммутабельный снимок спроса (Zero-Lock Atomic Swap).
+        """
+        if hasattr(self.parser, "set_snapshot"):
+            self.parser.set_snapshot(snapshot)
+        else:
+            self.parser.snapshot = snapshot
+        logger.info(f"[BotSession] Filter snapshot atomically swapped for {self.event_id}")
 
     def subscribe(self) -> asyncio.Queue[str | None]:
         q: asyncio.Queue[str | None] = asyncio.Queue()
@@ -162,13 +191,16 @@ class BotSession:
         client: httpx.AsyncClient,
     ) -> None:
         """
-        Цикл быстрого опроса SVG-схемы зала.
+        Цикл быстрого опроса SVG-схемы зала через ProducerUnit.
         """
         attempted_tickets: set[str] = set()
         iteration = 0
-        target = self.ctx.target_tickets
+        while True:
+            await counter.set_target(self.ctx.target_tickets)
+            if await counter.is_completed():
+                break
 
-        while not await counter.is_completed():
+            target = self.ctx.target_tickets
             iteration += 1
             logger.info(f"[BotSession] Iteration #{iteration} (Booked: {counter.value}/{target})...")
             self.broadcast({
@@ -178,9 +210,8 @@ class BotSession:
                 "target": target,
             })
 
-            svg_text = await self.fetcher.fetch_svg(svg_url, client=client)
-            if svg_text:
-                tickets = self.parser.parse(svg_text)
+            tickets = await self.producer_unit.poll_once(svg_url, client=client)
+            if tickets:
                 new_count = 0
                 for ticket in tickets:
                     if ticket.ticket_id not in attempted_tickets:
@@ -213,16 +244,22 @@ class BotSession:
         target = self.ctx.target_tickets
         svg_url = self.ctx.svg_url
 
+        manage_get = get_client is None
+        manage_post = post_client is None
+        active_get_client = get_client or httpx.AsyncClient()
+
+        if not svg_url:
+            svg_url = await self.fetcher.fetch_scheme_url(client=active_get_client)
+            if not svg_url:
+                raise ValueError(f"Could not resolve SVG scheme URL for event {eid}")
+            self.ctx.svg_url = svg_url
+
         logger.info(
             f"[BotSession] 🎯 Launching hunt for {eid} ({self.ctx.event_name}) | "
             f"Target: {target} | Consumers: {self.ctx.num_consumers} | Valid prices: {self.ctx.valid_price_ids}"
         )
         self.broadcast({"type": "status", "status": "running", "message": "Старт охоты за билетами..."})
         self.broadcast({"type": "session_initialized", "svg_url": svg_url})
-
-        manage_get = get_client is None
-        manage_post = post_client is None
-        active_get_client = get_client or httpx.AsyncClient(base_url=self.fetcher.event_url)
 
         headers = self.fetcher.headers_template.copy()
         if self.ctx.csrf_token:
@@ -254,6 +291,9 @@ class BotSession:
                 cookies=self.ctx.cookies,
                 headers=headers,
                 on_book_callback=handle_ticket_booked,
+                session_provider=self.session_provider,
+                on_payload_callback=self.on_payload_callback,
+                event_id=self.event_id,
             )
             self.consumer_pool.start(client=active_post_client)
 
@@ -388,7 +428,7 @@ class BotManager:
             svg_url=ctx.svg_url,
             page_status=page_status,
             error=error_data,
-            updated_at=time.time(),
+            created_at=time.time(),
         )
         self.presessions[eid] = presession
         logger.info(

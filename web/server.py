@@ -1,44 +1,41 @@
 import logging
-from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+import uvicorn
 
-from core.bot import bot_manager
-from web.api import router as bot_router
 from web.proxy import router as proxy_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("web.server")
 
 STATIC_DIR = Path(__file__).parent / "static"
+WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
+WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 
+app = FastAPI(
+    title="Ticketpro Web Proxy & HUD",
+    version="1.0.0",
+)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting Ticketpro Sniper Web Server...")
-    yield
-    logger.info("Server shutting down: stopping all active bot tasks...")
-    stopped_count = await bot_manager.stop_all()
-    logger.info(f"Graceful shutdown complete (stopped {stopped_count} tasks).")
-
-
-app = FastAPI(title="Ticketpro Reverse Proxy & Fast Sniper", lifespan=lifespan)
-
-# Mount overlay static assets
+# Static assets (HUD overlay script & styles)
 app.mount("/proxy-static", StaticFiles(directory=STATIC_DIR), name="proxy-static")
 
-# Include Bot Control API routes
-app.include_router(bot_router)
-
-# Include Reverse Proxy and direct checkout routes (must be included last)
+# Reverse Proxy routes (proxies Ticketpro and SaaS Gateway endpoints)
 app.include_router(proxy_router)
 
 
 def main():
-    import uvicorn
-    uvicorn.run("web.server:app", host="0.0.0.0", port=8000, reload=False, timeout_graceful_shutdown=1)
+    logger.info(f"Starting Ticketpro Web Proxy on {WEB_HOST}:{WEB_PORT}...")
+    uvicorn.run(
+        "web.server:app",
+        host=WEB_HOST,
+        port=WEB_PORT,
+        reload=False,
+        timeout_graceful_shutdown=1,
+    )
 
 
 if __name__ == "__main__":

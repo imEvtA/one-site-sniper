@@ -37,6 +37,10 @@ class Ticket:
         yield self.price_id
 
 
+from core.spatial import spatial_encoder
+from core.tasks.payloads import FilterSnapshot
+
+
 class BaseParser(ABC):
     @abstractmethod
     def parse(
@@ -62,19 +66,48 @@ class DefaultParser(BaseParser):
         allowed_sectors: Iterable[str] | None = None,
         filter_fn: Callable[[Ticket], bool] | None = None,
         valid_price_ids: set[str] | None = None,
+        snapshot: FilterSnapshot | None = None,
     ) -> None:
         self.allowed_price_ids = set(allowed_price_ids) if allowed_price_ids is not None else None
-        self.valid_price_ids = valid_price_ids if valid_price_ids is not None else self.allowed_price_ids
-        self.allowed_sectors = set(allowed_sectors) if allowed_sectors is not None else None
+        self._valid_price_ids = valid_price_ids if valid_price_ids is not None else self.allowed_price_ids
+        self._allowed_sectors = set(allowed_sectors) if allowed_sectors is not None else None
         self.filter_fn = filter_fn
+        self.snapshot = snapshot
 
         self.g_pattern = re.compile(
-            r'<g\b(?P<attrs>[^>]*\bprice_id="(?P<p>\d+)"[^>]*)>(?P<content>.*?)</g>',
+            r'<g\b(?P<attrs>[^>]*)>(?P<content>.*?)</g>',
             re.DOTALL
+        )
+        self.price_id_pattern = re.compile(
+            r'\b(?:price_id|priceId)="(?P<p>\d+)"'
         )
         self.circle_pattern = re.compile(
             r'<circle\s+id="(?P<t>\d+)"(?:\s+[^>]*?name="(?P<n>[^"]*)")?'
         )
+
+    @property
+    def valid_price_ids(self) -> set[str] | frozenset[str] | None:
+        if self.snapshot and self.snapshot.valid_price_ids:
+            return self.snapshot.valid_price_ids
+        return self._valid_price_ids
+
+    @valid_price_ids.setter
+    def valid_price_ids(self, val: set[str] | frozenset[str] | None) -> None:
+        self._valid_price_ids = val
+
+    @property
+    def allowed_sectors(self) -> set[str] | frozenset[str] | None:
+        if self.snapshot and self.snapshot.allowed_sectors:
+            return self.snapshot.allowed_sectors
+        return self._allowed_sectors
+
+    @allowed_sectors.setter
+    def allowed_sectors(self, val: set[str] | frozenset[str] | None) -> None:
+        self._allowed_sectors = val
+
+    def set_snapshot(self, snapshot: FilterSnapshot) -> None:
+        """Атомарная подмена ссылки на иммутабельный снимок (Zero-Lock Atomic Swap)."""
+        self.snapshot = snapshot
 
     @staticmethod
     def extract_event_prices(html_text: str) -> dict[str, dict[str, Any]]:
@@ -159,18 +192,19 @@ class DefaultParser(BaseParser):
         for g_match in self.g_pattern.finditer(svg_text):
             total_g_found += 1
             attrs = g_match.group("attrs")
-            if 'fill="#999999"' in attrs or 'fill="#c0c0c0"' in attrs.lower():
+            if 'fill="#999999"' in attrs or 'fill="#c0c0c0"' in attrs.lower() or 'fill="#939393"' in attrs.lower():
                 skipped_gray += 1
                 continue
 
-            price_id = g_match.group("p")
+            p_match = self.price_id_pattern.search(attrs)
+            group_price_id = p_match.group("p") if p_match else ""
 
-            # Проверка по множеству валидных price_id (только если фильтр задан и не пуст)
-            if self.valid_price_ids and price_id not in self.valid_price_ids:
-                skipped_price += 1
-                continue
+            # Проверка по snapshot или по старым полям (fallback)
+            current_snapshot = self.snapshot
+            valid_prices = current_snapshot.valid_price_ids if current_snapshot and current_snapshot.valid_price_ids else (self.valid_price_ids or self.allowed_price_ids)
+            allowed_sectors = current_snapshot.allowed_sectors if current_snapshot and current_snapshot.allowed_sectors else self.allowed_sectors
 
-            if self.allowed_price_ids and price_id not in self.allowed_price_ids:
+            if valid_prices and group_price_id and group_price_id not in valid_prices:
                 skipped_price += 1
                 continue
 
@@ -180,11 +214,30 @@ class DefaultParser(BaseParser):
                 total_circles_found += 1
                 ticket_id = c_match.group("t")
                 name = c_match.group("n") or ""
-                ticket = Ticket(ticket_id=ticket_id, price_id=price_id, name=name)
+                ticket = Ticket(ticket_id=ticket_id, price_id=group_price_id, name=name)
 
-                if self.allowed_sectors and ticket.sector not in self.allowed_sectors:
+                if allowed_sectors and ticket.sector not in allowed_sectors:
                     skipped_sector += 1
                     continue
+
+                # Если в snapshot есть spatial filter_boxes — проверяем соответствие
+                if current_snapshot and current_snapshot.filter_boxes:
+                    matched_box = False
+                    row_int = int(ticket.row) if ticket.row.isdigit() else 0
+                    seat_int = int(ticket.seat) if ticket.seat.isdigit() else 0
+                    loc_id = int(ticket.sector) if ticket.sector.isdigit() else 0
+
+                    for box in current_snapshot.filter_boxes:
+                        if spatial_encoder.is_match(
+                            packed_box=box,
+                            location_id=loc_id,
+                            row=row_int,
+                            seat=seat_int,
+                        ):
+                            matched_box = True
+                            break
+                    if not matched_box:
+                        continue
 
                 if self.filter_fn is not None and not self.filter_fn(ticket):
                     continue

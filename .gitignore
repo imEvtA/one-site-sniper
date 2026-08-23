@@ -21,7 +21,8 @@ env.bak/
 venv.bak/
 
 # Documentation
-docs/
+# docs/
+
 
 # Config files & Data (JSON)
 *.json
