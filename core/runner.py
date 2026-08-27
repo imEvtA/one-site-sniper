@@ -4,7 +4,7 @@ from typing import Any, Callable
 
 from core.bot import BotSession, BotStatus
 from core.pipeline import HuntingContext
-from core.tasks.parser import BaseParser, DefaultParser
+from core.tasks.parser import BaseParser, Parser
 from core.tasks.utils.constants import EVENT_ID
 
 logger = logging.getLogger("core.runner")
@@ -38,7 +38,7 @@ class Core:
             valid_price_ids=valid_prices,
             allowed_sectors=allowed_sectors,
         )
-        self.session = BotSession(self.ctx, parser_class=type(parser) if parser else DefaultParser)
+        self.session = BotSession(self.ctx, parser_class=type(parser) if parser else Parser)
         self.event_callback = event_callback
         self.event_id = event_id
         self.target_tickets = target_tickets

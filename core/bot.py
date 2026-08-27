@@ -19,7 +19,7 @@ from core.pipeline import (
 )
 from core.tasks.consumer import AtomicCounter, ConsumerPool
 from core.tasks.fetcher import Fetcher
-from core.tasks.parser import BaseParser, DefaultParser, Ticket
+from core.tasks.parser import BaseParser, Parser, Ticket
 
 logger = logging.getLogger("core.bot")
 
@@ -70,7 +70,7 @@ class BotSession:
     Получает готовый HuntingContext после успешного прохождения Preflight Pipeline
     и занимается исключительно скоростным снайпингом билетов.
     """
-    def __init__(self, ctx: HuntingContext, parser_class: type[BaseParser] = DefaultParser):
+    def __init__(self, ctx: HuntingContext, parser_class: type[BaseParser] = Parser):
         self.ctx = ctx
         self.status = BotStatus.IDLE
         self.booked = 0
@@ -307,7 +307,7 @@ class BotManager:
     """
     Фасад и реестр управления жизненным циклом ботов и предсессий.
     """
-    def __init__(self, parser_class: type[BaseParser] = DefaultParser):
+    def __init__(self, parser_class: type[BaseParser] = Parser):
         self.presessions: dict[str, PresessionData] = {}
         self.sessions: dict[str, BotSession] = {}
         self._locks: dict[str, asyncio.Lock] = {}

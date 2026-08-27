@@ -194,12 +194,120 @@ class DefaultParser(BaseParser):
                 results.append(ticket)
 
         logger.info(
-            f"[Parser] SVG parsed: groups={total_g_found} (gray={skipped_gray}, skipped_price={skipped_price}), "
+            f"[DefaultParser] SVG parsed: groups={total_g_found} (gray={skipped_gray}, skipped_price={skipped_price}), "
             f"seats_found={total_circles_found} (skipped_sector={skipped_sector}), "
             f"valid_tickets_matched={len(results)}"
         )
         return results
 
 
+class CurrentTicketproParser(BaseParser):
+    """
+    Парсер новой разметки Ticketpro.
+    Свободные места сгруппированы отдельно по тегам <g ... price_id="...">.
+    Парсер использует исключительно регулярные выражения, отбирает группы с валидными ценами
+    и извлекает доступные билеты без необходимости отдельной проверки на занятость.
+    """
+    def __init__(
+        self,
+        allowed_price_ids: Iterable[str] | None = None,
+        allowed_sectors: Iterable[str] | None = None,
+        filter_fn: Callable[[Ticket], bool] | None = None,
+        valid_price_ids: set[str] | None = None,
+        min_price: float | None = None,
+        max_price: float | None = None,
+        event_prices: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
+        self.allowed_price_ids = set(allowed_price_ids) if allowed_price_ids is not None else None
+        self.valid_price_ids = valid_price_ids if valid_price_ids is not None else self.allowed_price_ids
+        self.allowed_sectors = set(allowed_sectors) if allowed_sectors is not None else None
+        self.filter_fn = filter_fn
+        self.min_price = min_price
+        self.max_price = max_price
+        self.event_prices = event_prices
 
-Parser = DefaultParser
+        # Поиск групп свободных билетов с price_id
+        self.g_pattern = re.compile(
+            r'<g\b(?P<attrs>[^>]*\bprice_id=[\'"](?P<p>\d+)[\'"][^>]*)>(?P<content>.*?)</g>',
+            re.DOTALL
+        )
+        # Поиск тегов мест (circle) и извлечение атрибутов id и name с помощью regex
+        self.circle_pattern = re.compile(r'<circle\b(?P<attrs>[^>]*)/?>')
+        self.id_pattern = re.compile(r'\bid=[\'"](?P<t>\d+)[\'"]')
+        self.name_pattern = re.compile(r'\bname=[\'"](?P<n>[^\'"]*)[\'"]')
+
+    @staticmethod
+    def extract_event_prices(html_text: str) -> dict[str, dict[str, Any]]:
+        return DefaultParser.extract_event_prices(html_text)
+
+    def parse(
+        self,
+        svg_text: str,
+        queue: queue.Queue | asyncio.Queue | None = None
+    ) -> list[Ticket]:
+        results: list[Ticket] = []
+        total_g_found = 0
+        total_circles_found = 0
+        skipped_price = 0
+        skipped_sector = 0
+
+        # Поиск только ценовых групп со свободными билетами
+        for g_match in self.g_pattern.finditer(svg_text):
+            total_g_found += 1
+            price_id = g_match.group("p")
+
+            # Обязательная проверка на допустимые цены
+            if self.valid_price_ids and price_id not in self.valid_price_ids:
+                skipped_price += 1
+                continue
+
+            if self.allowed_price_ids and price_id not in self.allowed_price_ids:
+                skipped_price += 1
+                continue
+
+            if self.event_prices and price_id in self.event_prices:
+                price_val = self.event_prices[price_id].get("price", 0.0)
+                if self.min_price is not None and price_val < self.min_price:
+                    skipped_price += 1
+                    continue
+                if self.max_price is not None and price_val > self.max_price:
+                    skipped_price += 1
+                    continue
+
+            content = g_match.group("content")
+
+            # Извлечение мест через регулярные выражения
+            for c_match in self.circle_pattern.finditer(content):
+                c_attrs = c_match.group("attrs")
+                id_m = self.id_pattern.search(c_attrs)
+                if not id_m:
+                    continue
+
+                total_circles_found += 1
+                ticket_id = id_m.group("t")
+                name_m = self.name_pattern.search(c_attrs)
+                name = name_m.group("n") if name_m else ""
+                ticket = Ticket(ticket_id=ticket_id, price_id=price_id, name=name)
+
+                # Фильтрация по секторам
+                if self.allowed_sectors and ticket.sector not in self.allowed_sectors:
+                    skipped_sector += 1
+                    continue
+
+                # Пользовательская фильтрация
+                if self.filter_fn is not None and not self.filter_fn(ticket):
+                    continue
+
+                if queue is not None:
+                    queue.put_nowait(ticket)
+                results.append(ticket)
+
+        logger.info(
+            f"[CurrentTicketproParser] SVG parsed: groups={total_g_found} (skipped_price={skipped_price}), "
+            f"seats_found={total_circles_found} (skipped_sector={skipped_sector}), "
+            f"valid_tickets_matched={len(results)}"
+        )
+        return results
+
+
+Parser = CurrentTicketproParser

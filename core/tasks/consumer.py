@@ -247,23 +247,28 @@ class ConsumerPool:
             raise
 
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, timeout: float = 3.0) -> None:
         """
         Детерминированная остановка всех воркеров:
-        1. Взводит stop_event (немедленно будит всех воркеров).
-        2. Отменяет активные корутины.
-        3. Дожидается полного завершения их циклов (join/gather) с обработкой исключений.
+        1. Взводит stop_event (немедленно будит ожидающих воркеров).
+        2. Дожидается завершения активных HTTP-запросов бронирования.
+        3. При превышении таймаута отменяет оставшиеся корутины.
         """
         self.is_running = False
         self.stop_event.set()
         logger.info(f"[ConsumerPool] Shutting down {len(self._tasks)} workers...")
 
-        for t in self._tasks:
-            if not t.done():
-                t.cancel()
-
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._tasks, return_exceptions=True),
+                    timeout=timeout
+                )
+            except (asyncio.TimeoutError, Exception):
+                for t in self._tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
 
         logger.info("[ConsumerPool] All workers cleanly terminated.")
